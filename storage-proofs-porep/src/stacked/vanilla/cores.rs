@@ -169,40 +169,18 @@ fn core_groups(cores_per_unit: usize) -> Option<Vec<Mutex<Vec<CoreIndex>>>> {
             core_count, cache_count, group_size
         );
     }
-    println!("SETTINGS.multicore_sdr_enabled={}", SETTINGS.multicore_sdr_enabled);
-    fn use_core(core_id: usize) -> bool {
-        let condition = SETTINGS.multicore_sdr_enabled.as_str();
-        let conditions = condition.split(",");
-        for cond in conditions {
-            if cond.find("-").is_some() {
-                let mut dash = cond.split("-");
-                let begin = dash.next().unwrap_or("0").parse::<usize>().unwrap();
-                let end = dash.next().unwrap_or("9999").parse::<usize>().unwrap();
-                if begin <= core_id || core_id <= end {
-                    return true;
-                }
-            } else {
-                let core_id_cond = cond.parse::<usize>().unwrap();
-                if core_id == core_id_cond {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
 
     let core_groups = (0..group_count)
         .filter_map(|i| {
             let collected = (0..group_size)
                 .map(|j| i * group_size + j)
-                .filter(|j| use_core(*j))
+                .filter(|j| use_core(SETTINGS.multicore_sdr_enabled.as_str(), *j))
                 .map(|core_index| {
                     assert!(core_index < core_count);
                     CoreIndex(core_index)
                 })
                 .collect::<Vec<_>>();
             if collected.len() == group_size {
-                println!("CPU group: {:?}", collected);
                 Some(collected)
             } else {
                 None
@@ -212,6 +190,25 @@ fn core_groups(cores_per_unit: usize) -> Option<Vec<Mutex<Vec<CoreIndex>>>> {
     Some(
         core_groups
     )
+}
+fn use_core(condition: &str, core_id: usize) -> bool {
+    let conditions = condition.split(",");
+    for cond in conditions {
+        if cond.find("-").is_some() {
+            let mut dash = cond.split("-");
+            let begin = dash.next().unwrap_or("0").parse::<usize>().unwrap();
+            let end = dash.next().unwrap_or("9999").parse::<usize>().unwrap();
+            if begin <= core_id && core_id <= end {
+                return true;
+            }
+        } else {
+            let core_id_cond = cond.parse::<usize>().unwrap();
+            if core_id == core_id_cond {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 #[cfg(test)]
@@ -238,6 +235,19 @@ mod tests {
         match (checkout1, checkout2) {
             (Some(c1), Some(c2)) => assert!(*c1 != *c2),
             _ => panic!("failed to get two checkouts"),
+        }
+    }
+    #[test]
+    fn test_use_core() {
+        let condition = "5-10,16-20";
+        for i in 5..=10 {
+            assert!(use_core(condition, i));
+
+        }
+        assert!(!use_core(condition, 4));
+        for i in 16..=20 {
+            assert!(use_core(condition, i));
+
         }
     }
 }
