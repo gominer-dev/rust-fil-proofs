@@ -26,12 +26,14 @@ pub fn checkout_core_group() -> Option<MutexGuard<'static, CoreGroup>> {
     match &*CORE_GROUPS {
         Some(groups) => {
             for (i, group) in groups.iter().enumerate() {
-                match group.try_lock() {
-                    Ok(guard) => {
-                        debug!("checked out core group {}", i);
-                        return Some(guard);
+                if i >= SETTINGS.multicore_sdr_range_begin && i <= SETTINGS.multicore_sdr_range_end {
+                    match group.try_lock() {
+                        Ok(guard) => {
+                            debug!("checked out core group {}", i);
+                            return Some(guard);
+                        }
+                        Err(_) => debug!("core group {} locked, could not checkout", i),
                     }
-                    Err(_) => debug!("core group {} locked, could not checkout", i),
                 }
             }
             None

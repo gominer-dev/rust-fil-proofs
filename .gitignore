@@ -8,3 +8,7 @@ heaptrack*
 *.profile
 *.heap
 rust-fil-proofs.config.toml
+/.idea/.gitignore
+/.idea/modules.xml
+/.idea/rust-fil-proofs.iml
+/.idea/vcs.xml
