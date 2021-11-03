@@ -169,7 +169,7 @@ fn core_groups(cores_per_unit: usize) -> Option<Vec<Mutex<Vec<CoreIndex>>>> {
             core_count, cache_count, group_size
         );
     }
-
+    println!("SETTINGS.multicore_sdr_enabled={}", SETTINGS.multicore_sdr_enabled);
     fn use_core(core_id: usize) -> bool {
         let condition = SETTINGS.multicore_sdr_enabled.as_str();
         let conditions = condition.split(",");
@@ -202,6 +202,7 @@ fn core_groups(cores_per_unit: usize) -> Option<Vec<Mutex<Vec<CoreIndex>>>> {
                 })
                 .collect::<Vec<_>>();
             if collected.len() == group_size {
+                println!("CPU group: {:?}", collected);
                 Some(collected)
             } else {
                 None
