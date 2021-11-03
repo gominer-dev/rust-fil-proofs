@@ -28,8 +28,7 @@ pub struct Settings {
     pub parent_cache: String,
     pub use_multicore_sdr: bool,
     pub multicore_sdr_producers: usize,
-    pub multicore_sdr_range_begin: usize,
-    pub multicore_sdr_range_end: usize,
+    pub multicore_sdr_enabled: String,
     pub multicore_sdr_producer_stride: u64,
     pub multicore_sdr_lookahead: usize,
 }
@@ -54,8 +53,7 @@ impl Default for Settings {
             parent_cache: cache("filecoin-parents"),
             use_multicore_sdr: false,
             multicore_sdr_producers: 3,
-            multicore_sdr_range_begin: 0,
-            multicore_sdr_range_end: 44,
+            multicore_sdr_enabled: "0-9999".to_string(),
             multicore_sdr_producer_stride: 128,
             multicore_sdr_lookahead: 800,
         }

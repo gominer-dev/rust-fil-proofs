@@ -170,24 +170,46 @@ fn core_groups(cores_per_unit: usize) -> Option<Vec<Mutex<Vec<CoreIndex>>>> {
         );
     }
 
+    fn use_core(core_id: usize) -> bool {
+        let condition = SETTINGS.multicore_sdr_enabled.as_str();
+        let conditions = condition.split(",");
+        for cond in conditions {
+            if cond.find("-").is_some() {
+                let mut dash = cond.split("-");
+                let begin = dash.next().unwrap_or("0").parse::<usize>().unwrap();
+                let end = dash.next().unwrap_or("9999").parse::<usize>().unwrap();
+                if begin <= core_id || core_id <= end {
+                    return true;
+                }
+            } else {
+                let core_id_cond = cond.parse::<usize>().unwrap();
+                if core_id == core_id_cond {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     let core_groups = (0..group_count)
-        .map(|i| {
-            (0..group_size)
-                .map(|j| {
-                    let core_index = i * group_size + j;
+        .filter_map(|i| {
+            let collected = (0..group_size)
+                .map(|j| i * group_size + j)
+                .filter(use_core)
+                .map(|core_index| {
                     assert!(core_index < core_count);
                     CoreIndex(core_index)
                 })
-                .collect::<Vec<_>>()
-        })
-        .into_iter()
-        .skip(SETTINGS.multicore_sdr_range_begin)
-        .take(SETTINGS.multicore_sdr_range_end - SETTINGS.multicore_sdr_range_begin + 1);
+                .collect::<Vec<_>>();
+            if collected.len() == group_size {
+                Some(collected)
+            } else {
+                None
+            }
+        }).map(Mutex::new).collect();
 
     Some(
         core_groups
-            .map(|group| Mutex::new(group.clone()))
-            .collect::<Vec<_>>(),
     )
 }
 
