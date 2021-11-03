@@ -195,7 +195,7 @@ fn core_groups(cores_per_unit: usize) -> Option<Vec<Mutex<Vec<CoreIndex>>>> {
         .filter_map(|i| {
             let collected = (0..group_size)
                 .map(|j| i * group_size + j)
-                .filter(use_core)
+                .filter(|j| use_core(*j))
                 .map(|core_index| {
                     assert!(core_index < core_count);
                     CoreIndex(core_index)
