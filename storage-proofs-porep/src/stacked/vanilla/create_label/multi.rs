@@ -461,7 +461,7 @@ pub fn create_labels_for_encoding<Tree: 'static + MerkleTreeTrait, T: AsRef<[u8]
         debug!("binding core in main thread");
 
         // 临时测试代码
-        group.get(17).map(|core_index| bind_core(*core_index))
+        group.get(0).map(|core_index| bind_core(*core_index))
     });
 
     // NOTE: this means we currently keep 2x sector size around, to improve speed
