@@ -459,6 +459,8 @@ pub fn create_labels_for_encoding<Tree: 'static + MerkleTreeTrait, T: AsRef<[u8]
         // This could fail, but we will ignore the error if so.
         // It will be logged as a warning by `bind_core`.
         debug!("binding core in main thread");
+
+        // 临时测试代码
         group.get(17).map(|core_index| bind_core(*core_index))
     });
 
