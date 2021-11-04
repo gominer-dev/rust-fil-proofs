@@ -9,7 +9,6 @@ mod challenges;
 mod column;
 mod column_proof;
 #[cfg(feature = "multicore-sdr")]
-mod cores;
 mod encoding_proof;
 mod graph;
 mod labeling_proof;
@@ -21,6 +20,8 @@ mod proof;
 mod proof_scheme;
 #[cfg(feature = "multicore-sdr")]
 mod utils;
+#[cfg(feature = "multicore-sdr")]
+mod cores;
 
 pub use challenges::{ChallengeRequirements, LayerChallenges};
 pub use column::Column;
