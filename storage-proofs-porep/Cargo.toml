@@ -42,7 +42,7 @@ yastl = "0.1.2"
 fil_logger = "0.1"
 pairing = "0.21"
 blstrs = "0.4.0"
-core-allocator = { version = "0.1.6", optional = true }
+core-allocator = { version = "0.1.7", optional = true }
 serde_yaml = "*"
 
 [target."cfg(target_arch = \"aarch64\")".dependencies]
