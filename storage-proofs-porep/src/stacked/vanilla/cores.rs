@@ -25,16 +25,19 @@ impl CoreAllocatorSettings {
     }
     pub fn get_allocator(&self) -> Result<Box<dyn CoreAllocator>> {
         let depth = match self.level {
-            Level::L3 => {HierarchicalAllocator::L3_CACHE}
-            Level::L2 => {HierarchicalAllocator::L2_CACHE}
+            Level::L3 => { HierarchicalAllocator::L3_CACHE }
+            Level::L2 => { HierarchicalAllocator::L2_CACHE }
         };
         let mut allocator = HierarchicalAllocator::new_at_depth(depth);
         if let Some(cpus) = self.cpus.clone() {
             allocator = allocator.on_cpu(cpus);
         }
-        Ok(Box::new(allocator.finish()))
+        let finished = allocator.finish();
+        println!("CoreGroups {:?}", finished);
+        Ok(Box::new(finished))
     }
 }
+
 pub fn checkout_core_group() -> Option<CoreGroup> {
     lazy_static! {
         static ref ALLOCATOR: Box<dyn CoreAllocator> = {
