@@ -4,7 +4,7 @@ version = "10.1.0"
 authors = ["dignifiedquire <me@dignifiedquire.com>"]
 description = "Proofs of replication"
 license = "MIT OR Apache-2.0"
-edition = "2021"
+edition = "2018"
 repository = "https://github.com/filecoin-project/rust-fil-proofs"
 readme = "README.md"
 
