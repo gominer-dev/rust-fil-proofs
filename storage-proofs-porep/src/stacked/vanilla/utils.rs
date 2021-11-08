@@ -1,4 +1,5 @@
 use std::cell::UnsafeCell;
+use std::marker::PhantomData;
 use std::slice::{self, ChunksExactMut};
 
 /// A slice type which can be shared between threads, but must be fully managed by the caller.
@@ -6,7 +7,7 @@ use std::slice::{self, ChunksExactMut};
 #[derive(Debug)]
 pub struct UnsafeSlice<'a, T> {
     // holds the data to ensure lifetime correctness
-    data: UnsafeCell<&'a mut [T]>,
+    phantom: PhantomData<&'a mut [T]>,
     /// pointer to the data
     ptr: *mut T,
     /// Number of elements, not bytes.
@@ -20,8 +21,7 @@ impl<'a, T> UnsafeSlice<'a, T> {
     pub fn from_slice(source: &'a mut [T]) -> Self {
         let len = source.len();
         let ptr = source.as_mut_ptr();
-        let data = UnsafeCell::new(source);
-        Self { data, ptr, len }
+        Self { phantom: Default::default(), ptr, len }
     }
 
     /// Safety: The caller must ensure that there are no unsynchronized parallel access to the same regions.

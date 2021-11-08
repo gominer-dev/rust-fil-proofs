@@ -13,6 +13,7 @@ use crate::stacked::vanilla::{proof::LayerState, StackedBucketGraph};
 
 #[cfg(feature = "multicore-sdr")]
 pub mod multi;
+pub mod single_saving;
 pub mod single;
 
 /// Prepares the necessary `StoreConfig`s with which the layers are stored.

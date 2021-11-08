@@ -1,12 +1,10 @@
-use std::marker::PhantomData;
-use std::mem;
-
+use crate::stacked::ExpLabelsBuffer;
 use anyhow::{Context, Result};
 use filecoin_hashers::Hasher;
-use generic_array::typenum::Unsigned;
 use log::info;
-use merkletree::store::{DiskStore, Store, StoreConfig};
+use merkletree::store::StoreConfig;
 use sha2raw::Sha256;
+use std::marker::PhantomData;
 use storage_proofs_core::{
     drgraph::Graph,
     merkle::MerkleTreeTrait,
@@ -15,9 +13,9 @@ use storage_proofs_core::{
 
 use crate::stacked::vanilla::{
     cache::ParentCache,
-    create_label::{prepare_layers, read_layer, write_layer},
+    create_label::{prepare_layers, write_layer},
     proof::LayerState,
-    Labels, LabelsCache, StackedBucketGraph,
+    Labels, StackedBucketGraph,
 };
 
 #[allow(clippy::type_complexity)]
@@ -35,17 +33,9 @@ pub fn create_labels_for_encoding<Tree: 'static + MerkleTreeTrait, T: AsRef<[u8]
     let layer_size = graph.size() * NODE_SIZE;
     // NOTE: this means we currently keep 2x sector size around, to improve speed.
     let mut layer_labels = vec![0u8; layer_size]; // Buffer for labels of the current layer
-    let mut exp_labels = vec![0u8; layer_size]; // Buffer for labels of the previous layer, needed for expander parents
-
+    let mut exp_labels = ExpLabelsBuffer::new(8, true)?; // Buffer for labels of the previous layer, needed for expander parents
     for (layer, layer_state) in (1..=layers).zip(layer_states.iter()) {
         info!("generating layer: {}", layer);
-        if layer_state.generated {
-            info!("skipping layer {}, already generated", layer);
-
-            // load the already generated layer into exp_labels
-            read_layer(&layer_state.config, &mut exp_labels)?;
-            continue;
-        }
 
         parents_cache.reset()?;
 
@@ -66,7 +56,7 @@ pub fn create_labels_for_encoding<Tree: 'static + MerkleTreeTrait, T: AsRef<[u8]
                     graph,
                     Some(parents_cache),
                     &replica_id,
-                    &exp_labels,
+                    &mut exp_labels,
                     &mut layer_labels,
                     layer,
                     node,
@@ -86,7 +76,11 @@ pub fn create_labels_for_encoding<Tree: 'static + MerkleTreeTrait, T: AsRef<[u8]
         );
 
         info!("  setting exp parents");
-        mem::swap(&mut layer_labels, &mut exp_labels);
+        exp_labels.clear()?;
+        for node in 0..graph.size() {
+            prefill_exp_labels_data(graph, &mut exp_labels, &mut layer_labels, node + 1)?;
+        }
+        exp_labels.flip()?;
     }
 
     Ok((
@@ -96,78 +90,6 @@ pub fn create_labels_for_encoding<Tree: 'static + MerkleTreeTrait, T: AsRef<[u8]
         },
         layer_states,
     ))
-}
-
-#[allow(clippy::type_complexity)]
-pub fn create_labels_for_decoding<Tree: 'static + MerkleTreeTrait, T: AsRef<[u8]>>(
-    graph: &StackedBucketGraph<Tree::Hasher>,
-    parents_cache: &mut ParentCache,
-    layers: usize,
-    replica_id: T,
-    config: StoreConfig,
-) -> Result<LabelsCache<Tree>> {
-    info!("generate labels");
-
-    // For now, we require it due to changes in encodings structure.
-    let mut labels: Vec<DiskStore<<Tree::Hasher as Hasher>::Domain>> = Vec::with_capacity(layers);
-
-    let layer_size = graph.size() * NODE_SIZE;
-    // NOTE: this means we currently keep 2x sector size around, to improve speed.
-    let mut layer_labels = vec![0u8; layer_size]; // Buffer for labels of the current layer
-    let mut exp_labels = vec![0u8; layer_size]; // Buffer for labels of the previous layer, needed for expander parents
-
-    for layer in 1..=layers {
-        info!("generating layer: {}", layer);
-
-        parents_cache.reset()?;
-
-        if layer == 1 {
-            for node in 0..graph.size() {
-                create_label(
-                    graph,
-                    Some(parents_cache),
-                    &replica_id,
-                    &mut layer_labels,
-                    layer,
-                    node,
-                )?;
-            }
-        } else {
-            for node in 0..graph.size() {
-                create_label_exp(
-                    graph,
-                    Some(parents_cache),
-                    &replica_id,
-                    &exp_labels,
-                    &mut layer_labels,
-                    layer,
-                    node,
-                )?;
-            }
-        }
-
-        // Write the result to disk to avoid keeping it in memory all the time.
-        info!("  storing labels on disk");
-        write_layer(&layer_labels, &config)?;
-
-        let layer_store: DiskStore<<Tree::Hasher as Hasher>::Domain> =
-            DiskStore::new_from_disk(graph.size(), Tree::Arity::to_usize(), &config)?;
-        info!("  generated layer {} store with id {}", layer, config.id);
-
-        info!("  setting exp parents");
-        mem::swap(&mut layer_labels, &mut exp_labels);
-
-        // Track the layer specific store and StoreConfig for later retrieval.
-        labels.push(layer_store);
-    }
-
-    assert_eq!(
-        labels.len(),
-        layers,
-        "Invalid amount of layers encoded expected"
-    );
-
-    Ok(LabelsCache::<Tree> { labels })
 }
 
 pub fn create_label<H: Hasher, T: AsRef<[u8]>>(
@@ -211,7 +133,7 @@ pub fn create_label_exp<H: Hasher, T: AsRef<[u8]>>(
     graph: &StackedBucketGraph<H>,
     cache: Option<&mut ParentCache>,
     replica_id: T,
-    exp_parents_data: &[u8],
+    exp_parents_data: &mut ExpLabelsBuffer,
     layer_labels: &mut [u8],
     layer_index: usize,
     node: usize,
@@ -229,7 +151,13 @@ pub fn create_label_exp<H: Hasher, T: AsRef<[u8]>>(
         let prev = &layer_labels[(node - 1) * NODE_SIZE..node * NODE_SIZE];
         prefetch!(prev.as_ptr() as *const i8);
 
-        graph.copy_parents_data_exp(node as u32, layer_labels, exp_parents_data, hasher, cache)?
+        graph.copy_parents_data_exp_buffer(
+            node as u32,
+            layer_labels,
+            exp_parents_data,
+            hasher,
+            cache,
+        )?
     } else {
         hasher.finish()
     };
@@ -241,6 +169,21 @@ pub fn create_label_exp<H: Hasher, T: AsRef<[u8]>>(
 
     // strip last two bits, to ensure result is in Fr.
     layer_labels[end - 1] &= 0b0011_1111;
+
+    Ok(())
+}
+
+pub fn prefill_exp_labels_data<H: Hasher>(
+    graph: &StackedBucketGraph<H>,
+    exp_parents_data: &mut ExpLabelsBuffer,
+    layer_labels: &mut [u8],
+    node: usize,
+) -> Result<()> {
+    // prefetch previous node, which is always a parent
+    let prev = &layer_labels[(node - 1) * NODE_SIZE..node * NODE_SIZE];
+    prefetch!(prev.as_ptr() as *const i8);
+
+    graph.prefill_parents_data_exp_buffer(node as u32, layer_labels, exp_parents_data)?;
 
     Ok(())
 }

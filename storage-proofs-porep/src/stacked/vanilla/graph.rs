@@ -2,6 +2,7 @@ use std::convert::{TryFrom, TryInto};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 
+use crate::stacked::ExpLabelsBuffer;
 use anyhow::ensure;
 use filecoin_hashers::Hasher;
 use log::info;
@@ -77,6 +78,21 @@ fn read_node<'a>(i: usize, parents: &[u32], data: &'a [u8]) -> &'a [u8] {
     &data[start..end]
 }
 
+#[inline]
+fn read_node_buffer(i: usize, parents: &[u32], data: &mut ExpLabelsBuffer) -> [u8; NODE_SIZE] {
+    let start = parents[i];
+    data.read_channel(i - BASE_DEGREE, start).unwrap()
+}
+
+#[inline]
+fn write_node_buffer(i: usize, parents: &[u32], data: &[u8], buf: &mut ExpLabelsBuffer) {
+    buf.write_channel(
+        i - BASE_DEGREE,
+        parents[i],
+        <&[u8; 32]>::try_from(read_node(i, parents, data)).unwrap(),
+    )
+    .unwrap()
+}
 pub fn derive_feistel_keys(porep_id: PoRepID) -> [u64; 4] {
     let mut feistel_keys = [0u64; 4];
     let raw_seed = derive_porep_domain_seed(FEISTEL_DST, porep_id);
@@ -143,6 +159,53 @@ where
 
         ParentCache::new(cache_size, cache_entries, self)
     }
+    pub fn copy_parents_data_exp_buffer(
+        &self,
+        node: u32,
+        base_data: &[u8],
+        exp_data: &mut ExpLabelsBuffer,
+        hasher: Sha256,
+        mut cache: Option<&mut ParentCache>,
+    ) -> Result<[u8; 32]> {
+        if let Some(ref mut cache) = cache {
+            let cache_parents = cache.read(node as u32)?;
+            Ok(
+                self.copy_parents_data_inner_exp_buffer(
+                    &cache_parents,
+                    base_data,
+                    exp_data,
+                    hasher,
+                ),
+            )
+        } else {
+            let mut cache_parents = [0u32; DEGREE];
+
+            self.parents(node as usize, &mut cache_parents[..])
+                .expect("parents failure");
+            Ok(
+                self.copy_parents_data_inner_exp_buffer(
+                    &cache_parents,
+                    base_data,
+                    exp_data,
+                    hasher,
+                ),
+            )
+        }
+    }
+
+    pub fn prefill_parents_data_exp_buffer(
+        &self,
+        node: u32,
+        base_data: &[u8],
+        exp_data: &mut ExpLabelsBuffer,
+    ) -> Result<()> {
+        let mut cache_parents = [0u32; DEGREE];
+
+        self.parents(node as usize, &mut cache_parents[..])
+            .expect("parents failure");
+        Ok(self.prefill_parents_data_inner_exp_buffer(&cache_parents, base_data, exp_data))
+    }
+
     pub fn copy_parents_data_exp(
         &self,
         node: u32,
@@ -182,6 +245,57 @@ where
         }
     }
 
+    fn copy_parents_data_inner_exp_buffer(
+        &self,
+        cache_parents: &[u32],
+        base_data: &[u8],
+        exp_data: &mut ExpLabelsBuffer,
+        mut hasher: Sha256,
+    ) -> [u8; 32] {
+        let mut data = vec![];
+        for i in 6..14 {
+            data.push(read_node_buffer(i, cache_parents, exp_data));
+        }
+        prefetch(&cache_parents[..BASE_DEGREE], base_data);
+        // fill buffer
+        let parents = [
+            read_node(0, cache_parents, base_data),
+            read_node(1, cache_parents, base_data),
+            read_node(2, cache_parents, base_data),
+            read_node(3, cache_parents, base_data),
+            read_node(4, cache_parents, base_data),
+            read_node(5, cache_parents, base_data),
+            &data[0],
+            &data[1],
+            &data[2],
+            &data[3],
+            &data[4],
+            &data[5],
+            &data[6],
+            &data[7],
+        ];
+
+        // round 1 (14)
+        hasher.input(&parents);
+
+        // round 2 (14)
+        hasher.input(&parents);
+
+        // round 3 (9)
+        hasher.input(&parents[..8]);
+        hasher.finish_with(parents[8])
+    }
+
+    fn prefill_parents_data_inner_exp_buffer(
+        &self,
+        cache_parents: &[u32],
+        base_data: &[u8],
+        exp_data: &mut ExpLabelsBuffer,
+    ) {
+        for i in 6..14 {
+            write_node_buffer(i, cache_parents, base_data, exp_data);
+        }
+    }
     fn copy_parents_data_inner_exp(
         &self,
         cache_parents: &[u32],
