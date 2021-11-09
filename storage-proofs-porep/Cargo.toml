@@ -59,12 +59,12 @@ pretty_env_logger = "0.4.0"
 filecoin-hashers = { path = "../filecoin-hashers", version = "^5.0.0", default-features = false, features = ["poseidon", "sha256", "blake2s"]}
 
 [features]
-default = ["opencl", "multicore-sdr"]
+default = ["opencl", "multicore-sdr", "single-saving"]
 cuda = ["storage-proofs-core/cuda", "filecoin-hashers/cuda", "neptune/cuda", "bellperson/cuda", "fr32/cuda"]
 opencl = ["storage-proofs-core/opencl", "filecoin-hashers/opencl", "neptune/opencl", "bellperson/opencl", "fr32/opencl"]
 isolated-testing = []
 multicore-sdr = ["core-allocator"]
-
+single-saving = []
 [[bench]]
 name = "encode"
 harness = false

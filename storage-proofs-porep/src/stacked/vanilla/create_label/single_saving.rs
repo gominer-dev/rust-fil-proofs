@@ -187,3 +187,8 @@ pub fn prefill_exp_labels_data<H: Hasher>(
 
     Ok(())
 }
+
+pub use self::single::create_labels_for_decoding;
+mod single {
+    include!("single.rs");
+}
