@@ -25,8 +25,8 @@ impl CoreAllocatorSettings {
     }
     pub fn get_allocator(&self) -> Result<Box<dyn CoreAllocator>> {
         let depth = match self.level {
-            Level::L3 => { HierarchicalAllocator::L3_CACHE }
-            Level::L2 => { HierarchicalAllocator::L2_CACHE }
+            Level::L3 => { hwloc2::ObjectType::L3Cache }
+            Level::L2 => { hwloc2::ObjectType::L2Cache }
         };
         let mut allocator = HierarchicalAllocator::new_at_depth(depth);
         if let Some(cpus) = self.cpus.clone() {

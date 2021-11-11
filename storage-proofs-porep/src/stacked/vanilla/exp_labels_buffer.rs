@@ -1,6 +1,5 @@
 use anyhow::Context;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use log::*;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use storage_proofs_core::util::NODE_SIZE;
