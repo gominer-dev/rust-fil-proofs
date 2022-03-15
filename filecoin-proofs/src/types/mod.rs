@@ -101,10 +101,6 @@ pub type PartitionProof<Tree> = storage_proofs_update::vanilla::PartitionProof<T
 #[repr(transparent)]
 pub struct EmptySectorUpdateProof(pub Vec<u8>);
 
-#[derive(Debug, Clone, PartialEq)]
-#[repr(transparent)]
-pub struct EmptySectorUpdateProof(pub Vec<u8>);
-
 // This FallbackPoStSectorProof is used during Fallback PoSt, but
 // contains only Vanilla proof information and is not a full Fallback
 // PoSt proof.
