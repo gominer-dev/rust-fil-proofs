@@ -32,4 +32,4 @@ pub use exp_labels_buffer::ExpLabelsBuffer;
 pub use graph::{StackedBucketGraph, StackedGraph, EXP_DEGREE};
 pub use labeling_proof::LabelingProof;
 pub use params::*;
-pub use proof::{StackedDrg, TOTAL_PARENTS};
+pub use proof::{StackedDrg, TreeRElementData, TOTAL_PARENTS};

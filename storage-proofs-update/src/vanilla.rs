@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{ensure, Context, Error};
 use blstrs::Scalar as Fr;
 use ff::Field;
-use filecoin_hashers::{HashFunction, Hasher};
+use filecoin_hashers::{Domain, HashFunction, Hasher};
 use fr32::{bytes_into_fr, fr_into_bytes_slice};
-use generic_array::typenum::{Unsigned, U0};
+use generic_array::typenum::Unsigned;
 use log::{info, trace};
 use memmap::{Mmap, MmapMut, MmapOptions};
 use merkletree::{
@@ -16,25 +16,28 @@ use merkletree::{
     store::{DiskStore, Store, StoreConfig},
 };
 use neptune::Poseidon;
-use rayon::{iter::IntoParallelIterator, prelude::*};
+use rayon::{
+    iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator},
+    slice::ParallelSliceMut,
+};
 use serde::{Deserialize, Serialize};
 use storage_proofs_core::{
     data::Data,
     error::Result,
     merkle::{
-        create_lc_tree, get_base_tree_count, split_config_and_replica, LCTree, MerkleProof,
-        MerkleProofTrait, MerkleTreeTrait,
+        create_base_merkle_tree, create_lc_tree, get_base_tree_count, split_config_and_replica,
+        BinaryMerkleTree, LCTree, MerkleProof, MerkleProofTrait, MerkleTreeTrait,
     },
     parameter_cache::ParameterSetMetadata,
     proof::ProofScheme,
 };
-use storage_proofs_porep::stacked::StackedDrg;
+use storage_proofs_porep::stacked::{StackedDrg, TreeRElementData};
 
 use crate::{
     constants::{
-        apex_leaf_count, challenge_count, hs, partition_count, TreeD, TreeDArity, TreeDDomain,
-        TreeDHasher, TreeDStore, TreeRDomain, TreeRHasher, ALLOWED_SECTOR_SIZES,
-        POSEIDON_CONSTANTS_GEN_RANDOMNESS,
+        apex_leaf_count, challenge_count, challenge_count_poseidon, hs, partition_count, TreeD,
+        TreeDArity, TreeDDomain, TreeDHasher, TreeDStore, TreeRDomain, TreeRHasher,
+        ALLOWED_SECTOR_SIZES, POSEIDON_CONSTANTS_GEN_RANDOMNESS,
     },
     Challenges,
 };
@@ -47,22 +50,26 @@ pub struct SetupParams {
     pub sector_bytes: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicParams {
     // The sector-size measured in nodes.
     pub sector_nodes: usize,
     // The number of challenges per partition proof.
     pub challenge_count: usize,
-    // The number of bits per challenge, i.e. `challenge_bit_len = log2(sector_nodes)`.
+    // The number of bits per challenge, i.e. `challenge_bit_len = log2(sector_nodes)`, which is
+    // also the height of TreeD.
     pub challenge_bit_len: usize,
     // The number of partition proofs for this sector-size.
     pub partition_count: usize,
-    // The bit length of an integer in `0..partition_count`.
+    // The bit length of an integer in `0..partition_count` which is also the height of the
+    // partitions-tree within TreeD, i.e. the top of TreeD starting from the tree row containing
+    // each partition's apex-root and ending at TreeD's root.
     pub partition_bit_len: usize,
     // The number of leafs in the apex-tree.
     pub apex_leaf_count: usize,
-    // The bit length of an integer in `0..apex_leaf_count`.
-    pub apex_select_bit_len: usize,
+    // The bit length of an integer in `0..apex_leaf_count` which is also the height of each
+    // partition's apex-tree.
+    pub apex_leaf_bit_len: usize,
 }
 
 impl ParameterSetMetadata for PublicParams {
@@ -97,7 +104,7 @@ impl PublicParams {
 
         let apex_leaf_count = apex_leaf_count(sector_nodes);
         // `apex_leaf_count` is guaranteed to be a power of two.
-        let apex_select_bit_len = apex_leaf_count.trailing_zeros() as usize;
+        let apex_leaf_bit_len = apex_leaf_count.trailing_zeros() as usize;
 
         PublicParams {
             sector_nodes,
@@ -106,7 +113,28 @@ impl PublicParams {
             partition_count,
             partition_bit_len,
             apex_leaf_count,
-            apex_select_bit_len,
+            apex_leaf_bit_len,
+        }
+    }
+
+    pub fn from_sector_size_poseidon(sector_bytes: u64) -> Self {
+        let sector_nodes = ALLOWED_SECTOR_SIZES
+            .iter()
+            .copied()
+            .find(|allowed_nodes| (allowed_nodes << 5) as u64 == sector_bytes)
+            .expect("provided sector-size is not allowed");
+
+        let challenge_bit_len = sector_nodes.trailing_zeros() as usize;
+        let challenge_count = challenge_count_poseidon(sector_nodes);
+
+        PublicParams {
+            sector_nodes,
+            challenge_count,
+            challenge_bit_len,
+            partition_count: 1,
+            partition_bit_len: 0,
+            apex_leaf_count: 0,
+            apex_leaf_bit_len: 0,
         }
     }
 }
@@ -178,11 +206,12 @@ where
 {
     pub fn verify_merkle_proofs(
         &self,
-        c: usize,
+        c: u32,
         root_r_old: &TreeRDomain,
         comm_d_new: &TreeDDomain,
         root_r_new: &TreeRDomain,
     ) -> bool {
+        let c = c as usize;
         self.proof_r_old.path_index() == c
             && self.proof_d_new.path_index() == c
             && self.proof_r_new.path_index() == c
@@ -334,7 +363,7 @@ where
             partition_count,
             partition_bit_len,
             apex_leaf_count,
-            apex_select_bit_len,
+            apex_leaf_bit_len,
         } = *pub_params;
 
         let PublicInputs {
@@ -370,7 +399,7 @@ where
 
         // Compute apex-tree.
         let mut apex_tree: Vec<Vec<TreeDDomain>> = vec![apex_leafs.clone()];
-        for _ in 0..apex_select_bit_len {
+        for _ in 0..apex_leaf_bit_len {
             let tree_row: Vec<TreeDDomain> = apex_tree
                 .last()
                 .unwrap()
@@ -383,8 +412,9 @@ where
         }
 
         // All TreeDNew Merkle proofs should have an apex-leaf at height `apex_leafs_height` in the
-        // proof path.
-        let apex_leafs_height = challenge_bit_len - partition_bit_len - apex_select_bit_len;
+        // proof path, i.e. TreeDNew has height `challenge_bit_len`, partition-tree has height
+        // `partition_bit_len`, and apex-tree has height `apex_leaf_bit_len`.
+        let apex_leafs_height = challenge_bit_len - partition_bit_len - apex_leaf_bit_len;
 
         let root_r_old = challenge_proofs[0].proof_r_old.root();
         let root_r_new = challenge_proofs[0].proof_r_new.root();
@@ -399,43 +429,43 @@ where
 
         let phi = phi(&comm_d_new, &comm_r_old);
 
-        let challenges = Challenges::new(sector_nodes, comm_r_new, k);
+        let challenges: Vec<u32> = Challenges::new(sector_nodes, comm_r_new, k).collect();
         let get_high_bits_shr = challenge_bit_len - h;
 
-        for (c, challenge_proof) in challenges.zip(challenge_proofs.iter()) {
-            // Verify TreeROld Merkle proof.
-            if !challenge_proof.verify_merkle_proofs(
-                c as usize,
-                &root_r_old,
-                &comm_d_new,
-                &root_r_new,
-            ) {
-                return Ok(false);
-            }
+        let challenge_proofs_are_valid = challenges
+            .into_par_iter()
+            .zip(challenge_proofs.into_par_iter())
+            .all(|(c, challenge_proof)| {
+                // Verify TreeROld, TreeDNew, and TreeRNew Merkle proofs.
+                if !challenge_proof.verify_merkle_proofs(c, &root_r_old, &comm_d_new, &root_r_new) {
+                    return false;
+                }
 
-            // Verify replica encoding.
-            let label_r_old: Fr = challenge_proof.proof_r_old.leaf().into();
-            let label_d_new: Fr = challenge_proof.proof_d_new.leaf().into();
-            let label_r_new = challenge_proof.proof_r_new.leaf();
-            let c_high = c >> get_high_bits_shr;
-            let rho = rho(&phi, c_high);
-            let label_r_new_calc: TreeRDomain = (label_r_old + label_d_new * rho).into();
-            if label_r_new_calc != label_r_new {
-                return Ok(false);
-            }
+                // Verify replica encoding.
+                let label_r_old: Fr = challenge_proof.proof_r_old.leaf().into();
+                let label_d_new: Fr = challenge_proof.proof_d_new.leaf().into();
+                let label_r_new = challenge_proof.proof_r_new.leaf();
+                let c_high = c >> get_high_bits_shr;
+                let rho = rho(&phi, c_high);
+                let label_r_new_calc: TreeRDomain = (label_r_old + label_d_new * rho).into();
+                if label_r_new_calc != label_r_new {
+                    return false;
+                }
 
-            // Verify that TreeDNew Merkle proof and apex-tree agree.
-            if !challenge_proof.proof_d_new.path()
-                [apex_leafs_height..apex_leafs_height + apex_select_bit_len]
-                .iter()
-                .zip(apex_tree.iter())
-                .all(|(path_elem, apex_tree_row)| apex_tree_row.contains(&path_elem.0[0]))
-            {
-                return Ok(false);
-            }
-        }
+                // Check that apex-path is consistent with apex-tree.
+                let apex_path = &challenge_proof.proof_d_new.path()
+                    [apex_leafs_height..apex_leafs_height + apex_leaf_bit_len];
 
-        Ok(true)
+                apex_path
+                    .iter()
+                    .zip(apex_tree.iter())
+                    .all(|(path_elem, apex_tree_row)| {
+                        let sibling = &path_elem.0[0];
+                        apex_tree_row.contains(sibling)
+                    })
+            });
+
+        Ok(challenge_proofs_are_valid)
     }
 
     fn verify_all_partitions(
@@ -465,7 +495,7 @@ where
 // `phi = H(comm_d_new, comm_r_old)` where Poseidon uses the custom "gen randomness" domain
 // separation tag.
 #[inline]
-pub fn phi(comm_d_new: &TreeDDomain, comm_r_old: &TreeRDomain) -> TreeRDomain {
+pub fn phi<TreeDDomain: Domain>(comm_d_new: &TreeDDomain, comm_r_old: &TreeRDomain) -> TreeRDomain {
     let comm_d_new: Fr = (*comm_d_new).into();
     let comm_r_old: Fr = (*comm_r_old).into();
     Poseidon::new_with_preimage(
@@ -532,7 +562,7 @@ where
         let tree_d_arity = TreeDArity::to_usize();
         let tree_d_nodes = tree_d_new_config.size.expect("config size failure");
         trace!(
-            "Instantiating TreeDNew: leafs={}, base_store_size={})",
+            "Instantiating TreeDNew: leafs={}, base_store_size={}",
             tree_d_leafs,
             tree_d_nodes
         );
@@ -561,6 +591,7 @@ where
             tree_r_base_tree_leafs,
             tree_r_base_tree_count,
         )?;
+
         trace!(
             "Instantiating {}: arity={}-{}-{}, base_tree_count={}, base_store_size={}",
             name,
@@ -570,6 +601,14 @@ where
             tree_r_base_tree_count,
             tree_r_base_tree_nodes,
         );
+
+        trace!("ReplicaConfig Path: {:?}", replica_config.path);
+        for config in &tree_r_configs {
+            trace!(
+                "StoreConfig: {:?}",
+                StoreConfig::data_path(&config.path, &config.id)
+            );
+        }
         create_lc_tree::<LCTree<TreeRHasher, TreeR::Arity, TreeR::SubTreeArity, TreeR::TopTreeArity>>(
             tree_r_base_tree_nodes,
             &tree_r_configs,
@@ -697,13 +736,49 @@ where
             })
             .collect::<Result<Vec<ChallengeProof<TreeR>>>>()?;
 
-        info!("finished generating challege-proofs for partition k={}", k);
+        info!("finished generating challenge-proofs for partition k={}", k);
 
         Ok(PartitionProof {
             comm_c: *comm_c,
             apex_leafs,
             challenge_proofs,
         })
+    }
+
+    #[cfg(any(feature = "cuda", feature = "opencl"))]
+    #[allow(clippy::unnecessary_wraps)]
+    fn prepare_tree_r_data(
+        source: &DiskStore<TreeRDomain>,
+        _data: Option<&mut Data<'_>>,
+        start: usize,
+        end: usize,
+    ) -> Result<TreeRElementData<TreeR>> {
+        let tree_data: Vec<TreeRDomain> = source
+            .read_range(start..end)
+            .expect("failed to read from source");
+
+        if StackedDrg::<TreeR, TreeDHasher>::use_gpu_tree_builder() {
+            Ok(TreeRElementData::FrList(
+                tree_data.into_par_iter().map(|x| x.into()).collect(),
+            ))
+        } else {
+            Ok(TreeRElementData::ElementList(tree_data))
+        }
+    }
+
+    #[cfg(not(any(feature = "cuda", feature = "opencl")))]
+    #[allow(clippy::unnecessary_wraps)]
+    fn prepare_tree_r_data(
+        source: &DiskStore<TreeRDomain>,
+        _data: Option<&mut Data<'_>>,
+        start: usize,
+        end: usize,
+    ) -> Result<TreeRElementData<TreeR>> {
+        let tree_data: Vec<TreeRDomain> = source
+            .read_range(start..end)
+            .expect("failed to read from source");
+
+        Ok(TreeRElementData::ElementList(tree_data))
     }
 
     /// Returns tuple of (comm_r_new, comm_r_last_new, comm_d_new)
@@ -754,8 +829,8 @@ where
             "New replica and sector key file size mis-match (must be equal)"
         );
         ensure!(
-            staged_data_path_metadata.len() == sector_key_path_metadata.len(),
-            "Staged data and sector key file size mis-match (must be equal)"
+            staged_data_path_metadata.len() >= sector_key_path_metadata.len(),
+            "Staged data and sector key file size mis-match (must be equal or greater than)"
         );
 
         info!(
@@ -783,12 +858,13 @@ where
 
         // Re-open staged_data as Data (type)
         let mut new_data = Data::from_path(staged_data_path.to_path_buf());
-        new_data.ensure_data()?;
+        new_data.ensure_data_of_len(sector_key_path_metadata.len() as usize)?;
 
         // Generate tree_d over the staged_data.
-        let tree_d = StackedDrg::<TreeR, TreeDHasher>::build_binary_tree::<TreeDHasher>(
+        let tree_d = create_base_merkle_tree::<BinaryMerkleTree<TreeDHasher>>(
+            Some(tree_d_new_config),
+            tree_count * base_tree_nodes_count,
             new_data.as_ref(),
-            tree_d_new_config,
         )?;
 
         let comm_d_new = tree_d.root();
@@ -841,43 +917,21 @@ where
             })?;
         new_replica_data.flush()?;
 
-        let (configs, replica_config) = split_config_and_replica(
-            tree_r_last_new_config.clone(),
-            new_replica_path.to_path_buf(),
-            base_tree_nodes_count,
-            tree_count,
-        )?;
-
         // Open the new written replica data as a DiskStore.
         let new_replica_store: DiskStore<TreeRDomain> =
             DiskStore::new_from_slice(nodes_count, &new_replica_data[0..])?;
 
-        let mut start = 0;
-        let mut end = base_tree_nodes_count;
+        // This argument is currently unused by this invocation, but required for the API.
+        let mut unused_data = Data::empty();
 
-        for (i, config) in configs.iter().enumerate() {
-            let current_data: Vec<TreeRDomain> = new_replica_store.read_range(start..end)?;
-
-            start += base_tree_nodes_count;
-            end += base_tree_nodes_count;
-
-            info!(
-                "building base tree_r_last with CPU {}/{}",
-                i + 1,
-                tree_count
-            );
-            LCTree::<TreeRHasher, TreeR::Arity, U0, U0>::from_par_iter_with_config(
-                current_data,
-                config.clone(),
-            )?;
-        }
-
-        let tree_r_last = create_lc_tree::<
-            LCTree<TreeRHasher, TreeR::Arity, TreeR::SubTreeArity, TreeR::TopTreeArity>,
-        >(
-            tree_r_last_new_config.size.expect("config size failure"),
-            &configs,
-            &replica_config,
+        let tree_r_last = StackedDrg::<TreeR, TreeDHasher>::generate_tree_r_last::<TreeR::Arity>(
+            &mut unused_data,
+            base_tree_nodes_count,
+            tree_count,
+            tree_r_last_new_config,
+            new_replica_path.to_path_buf(),
+            &new_replica_store,
+            Some(Self::prepare_tree_r_data),
         )?;
 
         let comm_r_last_new = tree_r_last.root();
@@ -1014,11 +1068,12 @@ where
         replica_path: &Path,
         replica_cache_path: &Path,
         data_path: &Path,
+        tree_r_last_new_config: StoreConfig,
         comm_c: TreeRDomain,
         comm_d_new: TreeDDomain,
         comm_sector_key: TreeRDomain,
         h: usize,
-    ) -> Result<()> {
+    ) -> Result<TreeRDomain> {
         // Sanity check all input path types.
         ensure!(
             metadata(sector_key_cache_path)?.is_dir(),
@@ -1051,8 +1106,8 @@ where
             "Replica and sector key file size mis-match (must be equal)"
         );
         ensure!(
-            replica_path_metadata.len() == data_path_metadata.len(),
-            "Replica and data file size mis-match (must be equal)"
+            replica_path_metadata.len() <= data_path_metadata.len(),
+            "Replica and data file size mis-match (must be equal or less than)"
         );
 
         info!(
@@ -1125,6 +1180,23 @@ where
             })?;
         sector_key_data.flush()?;
 
-        Ok(())
+        // Open the new written sector_key data as a DiskStore.
+        let sector_key_store: DiskStore<TreeRDomain> =
+            DiskStore::new_from_slice(nodes_count, &sector_key_data[0..])?;
+
+        // This argument is currently unused by this invocation, but required for the API.
+        let mut unused_data = Data::empty();
+
+        let tree_r_last = StackedDrg::<TreeR, TreeDHasher>::generate_tree_r_last::<TreeR::Arity>(
+            &mut unused_data,
+            base_tree_nodes_count,
+            tree_count,
+            tree_r_last_new_config,
+            sector_key_cache_path.to_path_buf(),
+            &sector_key_store,
+            Some(Self::prepare_tree_r_data),
+        )?;
+
+        Ok(tree_r_last.root())
     }
 }

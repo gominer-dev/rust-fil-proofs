@@ -126,11 +126,19 @@ fn cache_empty_sector_update_params<Tree: 'static + MerkleTreeTrait<Hasher = Tre
     let public_params: storage_proofs_update::PublicParams =
         PublicParams::from_sector_size(u64::from(porep_config.sector_size));
 
+    let circuit = <EmptySectorUpdateCompound<Tree> as CompoundProof<
+        EmptySectorUpdate<Tree>,
+        EmptySectorUpdateCircuit<Tree>,
+    >>::blank_circuit(&public_params);
+
     let _ = <EmptySectorUpdateCompound<Tree> as CompoundProof<
         EmptySectorUpdate<Tree>,
         EmptySectorUpdateCircuit<Tree>,
     >>::groth_params::<OsRng>(Some(&mut OsRng), &public_params)
     .expect("failed to get groth params");
+
+    let _ = <EmptySectorUpdateCompound<Tree>>::get_param_metadata(circuit, &public_params)
+        .expect("failed to get metadata");
 
     let _ = <EmptySectorUpdateCompound<Tree> as CompoundProof<
         EmptySectorUpdate<Tree>,
@@ -145,9 +153,13 @@ fn cache_empty_sector_update_params<Tree: 'static + MerkleTreeTrait<Hasher = Tre
     about = "generates and caches SDR PoRep, Winning-PoSt, Window-PoSt, and EmptySectorUpdate groth params"
 )]
 struct Opt {
-    #[structopt(long, help = "Only cache PoSt groth params.")]
+    #[structopt(long, group = "onlyonecache", help = "Only cache PoSt groth params.")]
     only_post: bool,
-    #[structopt(long, help = "Only cache EmptySectorUpdate groth params.")]
+    #[structopt(
+        long,
+        group = "onlyonecache",
+        help = "Only cache EmptySectorUpdate groth params."
+    )]
     only_sector_update: bool,
     #[structopt(
         short = "z",
